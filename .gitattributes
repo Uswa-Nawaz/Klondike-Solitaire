@@ -1,0 +1,5 @@
+# Binary files: Git must never change their bytes (line-ending conversion would corrupt them)
+*.pdf binary
+*.png binary
+*.jpg binary
+*.ttf binary
