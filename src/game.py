@@ -3,10 +3,12 @@ Klondike Solitaire game logic (no graphics here).
 
 Stage 3: game setup - creating the piles and dealing the cards.
 Stage 4: moves and rules - moving cards, drawing, recycling, flipping, win.
+Stage 5: undo and redo.
 
 Data structures used in this file:
     Array/List  - the shuffled deck (from card.py), read by position while dealing
-    Stack       - 7 tableau columns, 4 foundations, the waste pile
+    Stack       - 7 tableau columns, 4 foundations, the waste pile,
+                  and the undo and redo history (14 Stacks in total)
     Queue       - the stock (draw pile)
     LinkedList  - inside every Stack/Queue; pop_many/push_many move a run
                   of tableau cards by relinking nodes
@@ -31,9 +33,11 @@ class KlondikeGame:
         # How many cards one click on the stock draws: 1 (Draw 1) or 3 (Draw 3).
         self.draw_count = 1
 
-        # Both dictionaries are filled in by new_game().
+        # All of these are (re)created by new_game().
         self.piles = {}
         self.card_locations = {}
+        self.undo_stack = Stack()
+        self.redo_stack = Stack()
 
         self.new_game(rng)
 
@@ -70,6 +74,18 @@ class KlondikeGame:
         # the SAME object that sits inside the pile (a reference, not a
         # copy), so the state is never stored twice.
         self.card_locations = {}
+
+        # ---- Undo/redo history: two Stacks of records ---------------
+        # Each record is a small dictionary describing one action, e.g.
+        #   {"action": "move", "source": "tableau_3",
+        #    "destination": "foundation_0", "count": 1, "flipped": True}
+        #   {"action": "draw", "count": 3}
+        #   {"action": "recycle"}
+        # The most recent action is on top of undo_stack (LIFO), so undo
+        # always reverses the LAST thing that happened first.
+        # Dealing is not an action, so a new game starts with both empty.
+        self.undo_stack = Stack()
+        self.redo_stack = Stack()
 
         # ---- Array/List: create and shuffle the 52-card deck --------
         deck = create_deck()
@@ -126,15 +142,20 @@ class KlondikeGame:
 
         # ---- Step 2: CHANGE (all checks passed) ---------------------
         count = len(moving_cards)
-        self._transfer(source_name, destination, count)
-        flipped = self._flip_exposed_card(source_name)
+        flipped = self._apply_move(source_name, destination, count)
 
-        # Stage 5 (undo/redo) will record this move HERE, using:
-        #   source_name, destination, count, flipped
-        # 'flipped' tells undo whether to turn the source's top card
-        # face down again after the cards are moved back.
-        # (Until Stage 5 the variable is computed but not yet stored.)
-
+        # ---- Step 3: RECORD the move so it can be undone ------------
+        # 'flipped' tells undo that a face-down card was turned face up.
+        # Undo must turn that card face down again FIRST (while it is
+        # still the top card of the source pile) and only THEN move the
+        # cards back on top of it.
+        self._record({
+            "action": "move",
+            "source": source_name,
+            "destination": destination,
+            "count": count,
+            "flipped": flipped,
+        })
         return (True, "")
 
     def draw_from_stock(self):
@@ -150,19 +171,76 @@ class KlondikeGame:
             if waste.is_empty():
                 return False
             self._recycle_waste()
-            # Stage 5 will record a "recycle" action HERE.
+            self._record({"action": "recycle"})
             return True
 
-        # Draw up to draw_count cards (fewer if the stock runs out).
-        drawn = 0
-        while drawn < self.draw_count and not stock.is_empty():
-            card = stock.dequeue()       # FIFO: the front card of the stock
-            card.flip_face_up()
-            self._place(card, "waste")   # push onto the waste + record location
-            drawn += 1
-
-        # Stage 5 will record a "draw" action of 'drawn' cards HERE.
+        # Record how many cards were ACTUALLY drawn (can be fewer than
+        # draw_count near the end of the stock), so undo returns exactly those.
+        drawn = self._draw_cards(self.draw_count)
+        self._record({"action": "draw", "count": drawn})
         return True
+
+    def undo(self):
+        """Reverse the most recent action.
+
+        Returns True if something was undone, False if there is nothing to
+        undo (then nothing changes).
+        """
+        if self.undo_stack.is_empty():
+            return False
+
+        record = self.undo_stack.pop()   # LIFO: the most recent action
+        action = record["action"]
+        if action == "move":
+            self._undo_move(record)
+        elif action == "draw":
+            self._undo_draw(record["count"])
+        else:
+            self._undo_recycle()
+
+        # Keep the record so the action can be redone.
+        self.redo_stack.push(record)
+        return True
+
+    def redo(self):
+        """Repeat the most recently undone action.
+
+        Returns True if something was redone, False if there is nothing to
+        redo (then nothing changes). Redo re-uses the same helpers as the
+        original action, so there is no second copy of the move/draw code.
+        The table is exactly as it was the first time, so the result
+        (including any flip) is the same.
+        """
+        if self.redo_stack.is_empty():
+            return False
+
+        record = self.redo_stack.pop()
+        action = record["action"]
+        if action == "move":
+            self._apply_move(record["source"], record["destination"], record["count"])
+        elif action == "draw":
+            self._draw_cards(record["count"])
+        else:
+            self._recycle_waste()
+
+        # Back onto the undo stack. The redo stack is NOT cleared here, so
+        # the player can redo several steps in a row.
+        self.undo_stack.push(record)
+        return True
+
+    def can_undo(self):
+        return not self.undo_stack.is_empty()
+
+    def can_redo(self):
+        return not self.redo_stack.is_empty()
+
+    def move_count(self):
+        """Number of actions made so far = number of records on the undo stack.
+
+        Undo lowers it and redo raises it automatically; there is no
+        separate counter that could get out of step.
+        """
+        return len(self.undo_stack)
 
     def can_pick_up(self, card_id):
         """True if the player may select this card (and the cards above it)."""
@@ -287,10 +365,103 @@ class KlondikeGame:
     # Changes (the ONLY methods that put cards into piles)
     # ==================================================================
 
+    def _record(self, record):
+        """Save a NEW action on the undo stack and forget the redo history.
+
+        Once the player does something new, the old "future" that redo
+        could return to no longer exists, so the redo stack is cleared.
+        """
+        self.undo_stack.push(record)
+        self.redo_stack.clear()
+
+    def _apply_move(self, source_name, destination, count):
+        """Move 'count' cards and flip the newly exposed card (no rule checks).
+
+        Called by move_cards (after its checks) and by redo.
+        Returns True if a face-down card was flipped face up.
+        """
+        self._transfer(source_name, destination, count)
+        return self._flip_exposed_card(source_name)
+
+    def _draw_cards(self, count):
+        """Move up to 'count' cards from the stock to the waste, face up.
+
+        Called by draw_from_stock and by redo. Returns how many were drawn
+        (fewer than 'count' if the stock runs out).
+        """
+        stock = self.piles["stock"]
+        drawn = 0
+        while drawn < count and not stock.is_empty():
+            card = stock.dequeue()       # FIFO: the front card of the stock
+            card.flip_face_up()
+            self._place(card, "waste")   # push onto the waste + record location
+            drawn += 1
+        return drawn
+
+    def _undo_move(self, record):
+        """Reverse a move: re-hide the flipped card FIRST, then move cards back."""
+        source = self.piles[record["source"]]
+
+        # Step 1: if the move exposed a face-down card and flipped it, that
+        # card is still the top of the source pile. Turn it face down now,
+        # BEFORE the returning cards cover it again.
+        if record["flipped"]:
+            source.peek().flip_face_down()
+
+        # Step 2: move the same number of cards back (pop_many/push_many).
+        # No rule checks: we return to a position that already existed.
+        self._transfer(record["destination"], record["source"], record["count"])
+
+    def _undo_draw(self, count):
+        """Put the last 'count' drawn cards back at the FRONT of the stock.
+
+        The Queue only adds at the back, so we use FIFO operations only:
+          1. Pop the drawn cards off the waste onto a temporary Stack.
+             If c1, c2, c3 were drawn, c3 was on top of the waste, so after
+             this reversal c1 is on top of the temporary Stack.
+          2. Pop the temporary Stack (c1, c2, c3), turn each face down and
+             enqueue it at the BACK of the stock.
+          3. ROTATE: dequeue each of the cards that were already in the
+             stock and enqueue it again at the back. After that, c1, c2, c3
+             are at the front, in their original order.
+        Cost: O(n) for n cards in the stock (at most 24).
+        """
+        stock = self.piles["stock"]
+        waste = self.piles["waste"]
+        cards_already_in_stock = len(stock)
+
+        # Step 1: waste -> temporary stack (reverses the order).
+        temporary = Stack()
+        for _ in range(count):
+            temporary.push(waste.pop())
+
+        # Step 2: temporary stack -> back of the stock, face down.
+        while not temporary.is_empty():
+            card = temporary.pop()
+            card.flip_face_down()
+            self._place(card, "stock")   # enqueue + record location
+
+        # Step 3: rotate the older cards behind the returned ones.
+        for _ in range(cards_already_in_stock):
+            self._place(stock.dequeue(), "stock")
+
+    def _undo_recycle(self):
+        """Move the stock back to the waste exactly as before the recycle.
+
+        After a recycle the stock holds c1..cN (c1 at the front) and the
+        waste is empty. Dequeuing gives c1 first; pushing each onto the
+        waste rebuilds c1 at the bottom and cN on top, all face up.
+        """
+        stock = self.piles["stock"]
+        while not stock.is_empty():
+            card = stock.dequeue()
+            card.flip_face_up()
+            self._place(card, "waste")   # push + record location
+
     def _place(self, card, pile_name):
         """Put ONE card on top of a pile AND record where it is.
 
-        Used for dealing, drawing and recycling. Together with _transfer,
+        Used for dealing, drawing, recycling and undo. Together with _transfer,
         this is the only code that puts cards into piles, so the
         card_locations dictionary can never be forgotten or get out of date.
         (The leading underscore means "for use inside this class only".)

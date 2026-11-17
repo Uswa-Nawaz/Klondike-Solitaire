@@ -554,5 +554,214 @@ class WinAndConsistencyTests(unittest.TestCase):
         self.assertGreater(moves_made, 0)   # the test really moved cards
 
 
+# ======================================================================
+# Stage 5: undo and redo
+# ======================================================================
+
+def play_many_actions(game, rounds=40):
+    """Helper: draw, then make the first legal move found, again and again.
+
+    With 40 draws and only 24 stock cards, the stock is recycled at least
+    once, so moves, draws and recycles all happen.
+    """
+    for _ in range(rounds):
+        game.draw_from_stock()
+        for card_id in list(game.card_locations):
+            moved = False
+            for destination in list(game.piles):
+                ok, _ = game.move_cards(card_id, destination)
+                if ok:
+                    moved = True
+                    break
+            if moved:
+                break
+
+
+class UndoRedoTests(unittest.TestCase):
+
+    def test_undo_and_redo_a_move(self):
+        game = empty_table()
+        place(game, "tableau_0", "7S")
+        place(game, "tableau_1", "6H")
+        before = snapshot(game)
+        game.move_cards("6H", "tableau_0")
+        after = snapshot(game)
+
+        self.assertTrue(game.undo())
+        self.assertEqual(snapshot(game), before)
+        self.assertEqual(game.card_locations["6H"]["pile"], "tableau_1")
+
+        self.assertTrue(game.redo())
+        self.assertEqual(snapshot(game), after)
+        assert_consistent(self, game, 2)
+
+    def test_undo_turns_the_flipped_card_face_down_again(self):
+        game = empty_table()
+        place(game, "tableau_0", "8H")
+        place(game, "tableau_1", "9C", face_up=False)
+        place(game, "tableau_1", "7C")
+        before = snapshot(game)
+
+        game.move_cards("7C", "tableau_0")
+        nine_of_clubs = game.card_locations["9C"]["card"]
+        self.assertTrue(nine_of_clubs.face_up)          # flipped by the move
+
+        game.undo()
+        self.assertFalse(nine_of_clubs.face_up)         # hidden again
+        self.assertEqual(ids(game, "tableau_1"), ["9C", "7C"])
+        self.assertEqual(snapshot(game), before)
+
+        game.redo()
+        self.assertTrue(nine_of_clubs.face_up)          # flipped again
+        self.assertEqual(ids(game, "tableau_0"), ["8H", "7C"])
+        assert_consistent(self, game, 3)
+
+    def test_undo_and_redo_draw_one(self):
+        game = seeded_game()
+        before = snapshot(game)
+        game.draw_from_stock()
+        after = snapshot(game)
+
+        game.undo()
+        self.assertEqual(snapshot(game), before)   # same stock order, face down
+
+        game.redo()
+        self.assertEqual(snapshot(game), after)    # the same card is drawn
+        assert_consistent(self, game)
+
+    def test_undo_and_redo_draw_three(self):
+        game = seeded_game()
+        game.draw_count = 3
+        game.draw_from_stock()                     # 3 cards already on the waste
+        before = snapshot(game)
+        game.draw_from_stock()                     # 3 more (queue rotation needed)
+        after = snapshot(game)
+
+        game.undo()
+        self.assertEqual(snapshot(game), before)
+
+        game.redo()
+        self.assertEqual(snapshot(game), after)
+        assert_consistent(self, game)
+
+    def test_undo_draw_three_when_fewer_cards_were_drawn(self):
+        game = empty_table()
+        game.draw_count = 3
+        place(game, "stock", "4C", face_up=False)
+        place(game, "stock", "9H", face_up=False)
+        before = snapshot(game)
+
+        game.draw_from_stock()                     # only 2 cards drawn
+        game.undo()
+
+        self.assertEqual(snapshot(game), before)
+        self.assertEqual(ids(game, "stock"), ["4C", "9H"])
+
+    def test_undo_and_redo_recycle(self):
+        game = seeded_game()
+        for _ in range(24):
+            game.draw_from_stock()
+        before = snapshot(game)
+        game.draw_from_stock()                     # recycle
+        after = snapshot(game)
+
+        game.undo()
+        self.assertEqual(snapshot(game), before)   # waste rebuilt, face up
+
+        game.redo()
+        self.assertEqual(snapshot(game), after)
+        assert_consistent(self, game)
+
+    def test_several_undos_and_redos_in_a_row(self):
+        game = seeded_game()
+        states = [snapshot(game)]
+        for _ in range(6):
+            game.draw_from_stock()
+            states.append(snapshot(game))
+
+        for _ in range(3):
+            game.undo()
+        self.assertEqual(snapshot(game), states[3])
+
+        game.redo()
+        game.redo()
+        self.assertEqual(snapshot(game), states[5])
+        assert_consistent(self, game)
+
+    def test_new_action_clears_redo(self):
+        game = seeded_game()
+        game.draw_from_stock()
+        game.draw_from_stock()
+        game.undo()
+        self.assertTrue(game.can_redo())
+
+        game.draw_from_stock()                     # a NEW action
+
+        self.assertFalse(game.can_redo())
+        self.assertFalse(game.redo())
+
+    def test_undo_and_redo_with_empty_history_change_nothing(self):
+        game = seeded_game()
+        before = snapshot(game)
+        self.assertFalse(game.can_undo())
+        self.assertFalse(game.can_redo())
+        self.assertFalse(game.undo())
+        self.assertFalse(game.redo())
+        self.assertEqual(snapshot(game), before)
+
+    def test_move_count_follows_actions_undo_and_redo(self):
+        game = empty_table()
+        place(game, "tableau_0", "7S")
+        place(game, "tableau_1", "6H")
+        place(game, "stock", "2D", face_up=False)
+        self.assertEqual(game.move_count(), 0)
+
+        game.draw_from_stock()
+        self.assertEqual(game.move_count(), 1)
+        game.move_cards("6H", "tableau_0")
+        self.assertEqual(game.move_count(), 2)
+        game.move_cards("2D", "tableau_5")         # illegal: not counted
+        self.assertEqual(game.move_count(), 2)
+
+        game.undo()
+        self.assertEqual(game.move_count(), 1)
+        game.redo()
+        self.assertEqual(game.move_count(), 2)
+
+    def test_new_game_empties_both_history_stacks(self):
+        game = seeded_game()
+        game.draw_from_stock()
+        game.draw_from_stock()
+        game.undo()
+
+        game.new_game(random.Random(5))
+
+        self.assertFalse(game.can_undo())
+        self.assertFalse(game.can_redo())
+        self.assertEqual(game.move_count(), 0)
+
+    def test_undo_everything_returns_to_the_starting_deal_exactly(self):
+        game = seeded_game(3)
+        start = snapshot(game)
+        play_many_actions(game)
+        end = snapshot(game)
+
+        # The history must contain all three kinds of action.
+        kinds = set(record["action"] for record in game.undo_stack)
+        self.assertEqual(kinds, {"move", "draw", "recycle"})
+        total_actions = game.move_count()
+
+        undone = 0
+        while game.undo():
+            undone += 1
+            assert_consistent(self, game)
+        self.assertEqual(undone, total_actions)
+        self.assertEqual(snapshot(game), start)    # identical to the deal
+
+        while game.redo():
+            assert_consistent(self, game)
+        self.assertEqual(snapshot(game), end)      # identical to the end
+
+
 if __name__ == "__main__":
     unittest.main()
