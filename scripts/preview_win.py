@@ -1,11 +1,12 @@
 """
-Preview the win overlay without playing a whole game.
+Preview the win page without playing a whole game.
 
 This is a separate developer script; the real game (src/main.py) has no
-cheat or shortcut. It builds a won position and opens the normal window.
+cheat or shortcut. It builds a won position and opens the window on the
+win page.
 
 Run from the project folder with:
-    .venv\\Scripts\\python.exe scripts\\preview_win.py
+    python scripts\\preview_win.py
 
 How the winning position is built (game.py is NOT changed):
   1. Create a normal KlondikeGame, which deals 52 Card objects.
@@ -23,10 +24,12 @@ import sys
 # Let Python find the modules in src/.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from PyQt6.QtWidgets import QApplication  # noqa: E402
+
 from card import SUITS  # noqa: E402
 from data_structures import Queue, Stack  # noqa: E402
 from game import KlondikeGame  # noqa: E402
-from ui import SolitaireUI  # noqa: E402
+from ui import MainWindow  # noqa: E402
 
 
 def make_winning_position(game):
@@ -47,9 +50,13 @@ def make_winning_position(game):
 
 
 def main():
+    app = QApplication(sys.argv)
     game = KlondikeGame()
     make_winning_position(game)
-    SolitaireUI(game).run()   # click "Play again" to start a normal game
+    window = MainWindow(game)
+    window.show_win()        # Play Again starts a normal game
+    window.show()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

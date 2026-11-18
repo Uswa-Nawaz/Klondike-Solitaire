@@ -1,18 +1,23 @@
 """
-Start Klondike Solitaire.
+Start Klondike Solitaire (PyQt6 version).
 
 Run from the project folder with:
-    .venv\\Scripts\\python.exe src\\main.py
+    python src\\main.py
 """
 
+import sys
+
+from PyQt6.QtWidgets import QApplication
+
 from game import KlondikeGame
-from ui import SolitaireUI
+from ui import MainWindow
 
 
 def main():
-    game = KlondikeGame()        # game logic: piles, rules, undo/redo
-    ui = SolitaireUI(game)       # window: draws the game, turns clicks into calls
-    ui.run()                     # loop until the window is closed
+    app = QApplication(sys.argv)          # every PyQt program needs one
+    window = MainWindow(KlondikeGame())   # game logic + the window that shows it
+    window.show()
+    sys.exit(app.exec())                  # Qt's event loop: runs until the window closes
 
 
 if __name__ == "__main__":

@@ -1,11 +1,12 @@
 """
-Smoke test for src/ui.py: draw frames and simulate clicks on a HIDDEN window.
+Smoke test for the PyQt6 interface: pages, a few clicks and the win page,
+all on Qt's hidden "offscreen" platform (no real window opens).
 
-A smoke test only checks that nothing crashes; the rules themselves are
-tested in test_game.py, and the look is checked by playing the game.
+A smoke test only checks that nothing crashes and that clicks reach the
+game; the rules themselves are tested in test_game.py.
 
 Run all tests from the project root with:
-    .venv\\Scripts\\python.exe -m unittest discover -s tests -v
+    python -m unittest discover -s tests -v
 """
 
 import os
@@ -13,27 +14,24 @@ import random
 import sys
 import unittest
 
-# "dummy" makes pygame draw into memory instead of opening a real window.
-# These must be set BEFORE pygame creates the window.
-os.environ["SDL_VIDEODRIVER"] = "dummy"
-os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
+# Must be set BEFORE the QApplication is created.
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import pygame  # noqa: E402
+from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 from card import SUITS  # noqa: E402
 from data_structures import Queue, Stack  # noqa: E402
 from game import KlondikeGame  # noqa: E402
-from ui import SolitaireUI  # noqa: E402
+from ui import MainWindow  # noqa: E402
+
+# A PyQt program has exactly one QApplication; reuse it if it exists.
+app = QApplication.instance() or QApplication([])
 
 
 def make_winning_position(game):
-    """Test-only: move all 52 of the game's own cards onto the foundations.
-
-    Uses only the existing game attributes and its _place helper;
-    game.py itself is not changed.
-    """
+    """Test-only: move all 52 of the game's own cards onto the foundations."""
     cards = [entry["card"] for entry in game.card_locations.values()]
     for pile_name in list(game.piles):
         if pile_name == "stock":
@@ -49,10 +47,10 @@ def make_winning_position(game):
                     game._place(card, f"foundation_{number}")
 
 
-def rect_of_card(ui, card_id):
-    """The click rectangle of a card in the frame that was just drawn."""
-    for rect, kind, value in ui.click_targets:
-        if kind == "card" and value == card_id:
+def rect_of(table, kind, value):
+    """The click rectangle of a card or pile, from the table's own layout."""
+    for rect, entry_kind, entry_value in table.compute_layout():
+        if entry_kind == kind and entry_value == value:
             return rect
     return None
 
@@ -61,48 +59,60 @@ class UISmokeTests(unittest.TestCase):
 
     def setUp(self):
         self.game = KlondikeGame(random.Random(1))
-        self.ui = SolitaireUI(self.game)
+        self.window = MainWindow(self.game)
+        self.window.resize(1280, 800)
+        self.window.show()
+        app.processEvents()
 
     def tearDown(self):
-        pygame.quit()
+        self.window.close()
 
-    def test_draws_a_frame(self):
-        self.ui.draw()
-        self.assertGreater(len(self.ui.click_targets), 0)
+    def test_pages_switch_with_the_buttons(self):
+        window = self.window
+        self.assertIs(window.stack.currentWidget(), window.menu_page)
+        window.menu_page.instructions_button.click()
+        self.assertIs(window.stack.currentWidget(), window.instructions_page)
+        window.instructions_page.back_button.click()
+        window.menu_page.play_button.click()
+        self.assertIs(window.stack.currentWidget(), window.game_page)
+        window.grab()                                  # paints every widget
+        window.game_page.menu_button.click()
+        self.assertIs(window.stack.currentWidget(), window.menu_page)
 
-    def test_clicks_call_the_game_and_clear_the_selection(self):
-        ui = self.ui
-        game = self.game
-        ui.draw()
+    def test_clicks_reach_the_game_and_clear_the_selection(self):
+        page = self.window.game_page
+        table = page.table
+        self.window.menu_page.play_button.click()
+        app.processEvents()
 
-        ui.handle_click(ui.stock_rect.center)               # draw a card
-        self.assertEqual(len(game.piles["waste"]), 1)
-        ui.draw()
+        table.handle_click(rect_of(table, "pile", "stock").center())
+        self.assertEqual(len(self.game.piles["waste"]), 1)
 
-        top_card = game.piles["tableau_6"].peek()
-        ui.handle_click(rect_of_card(ui, top_card.card_id).center)
-        self.assertEqual(ui.selected_card_id, top_card.card_id)
+        top_card_id = self.game.piles["tableau_6"].peek().card_id
+        table.handle_click(rect_of(table, "card", top_card_id).center())
+        self.assertEqual(table.selected_card_id, top_card_id)
 
-        ui.handle_click(ui.buttons["undo"].center)          # undo the draw
-        self.assertIsNone(ui.selected_card_id)
-        self.assertEqual(len(game.piles["waste"]), 0)
+        page.undo_button.click()
+        self.assertIsNone(table.selected_card_id)
+        self.assertEqual(len(self.game.piles["waste"]), 0)
+        self.assertFalse(page.undo_button.isEnabled())
 
-        ui.handle_click(ui.buttons["draw_mode"].center)     # Draw 3 + new game
-        self.assertEqual(game.draw_count, 3)
-        self.assertEqual(game.move_count(), 0)
+        page.mode_button.click()                       # Draw 3 + new game
+        self.assertEqual(self.game.draw_count, 3)
+        self.assertEqual(self.game.move_count(), 0)
+        self.window.grab()
 
-        ui.handle_click(ui.buttons["new_game"].center)
-        ui.handle_click((5, 600))                           # bare felt
-        ui.draw()
-
-    def test_win_overlay_draws_and_play_again_starts_a_new_game(self):
+    def test_win_page_appears_and_play_again_starts_a_new_game(self):
+        window = self.window
+        window.menu_page.play_button.click()
         make_winning_position(self.game)
-        self.assertTrue(self.game.is_won())
-        self.ui.draw()                                      # overlay must not crash
+        window.game_page.after_change()                # the game page notices the win
+        self.assertIs(window.stack.currentWidget(), window.win_page)
+        window.grab()
 
-        self.ui.handle_click(self.ui.play_again_rect.center)
+        window.win_page.play_again_button.click()
+        self.assertIs(window.stack.currentWidget(), window.game_page)
         self.assertFalse(self.game.is_won())
-        self.ui.draw()
 
 
 if __name__ == "__main__":
